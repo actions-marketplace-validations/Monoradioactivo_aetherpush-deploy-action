@@ -10,10 +10,10 @@ inputs:
 
   access-key:
     description: |
-      Aether API key for authentication. Generate one via `aether api-key add --scope deploy`
-      or in the Aether dashboard, then store as a GitHub secret. Do not use session access
-      keys created with `aether access-key add` — they invalidate when the owner resets their
-      password and have a fixed 60-day expiration.
+      Aether API key for authentication. Create one in the Aether dashboard under
+      API Keys, scoped to deploy, then store it as a GitHub secret. Do not use session
+      access keys (created in the dashboard under Account → CLI access keys) — they
+      invalidate when the owner resets their password and have a fixed 60-day expiration.
     required: true
 
   app-name:
@@ -72,7 +72,10 @@ inputs:
     default: 'false'
 
   no-duplicate-release-error:
-    description: 'When set to `true`, releasing an identical package produces a warning instead of an error.'
+    description: |
+      When set to `true`, a 409 from the server makes the CLI warn instead of
+      error and the step succeeds with empty release outputs. The CLI warning
+      names the reason (identical package, or an unfinished rollout).
     required: false
     default: 'false'
 
@@ -156,7 +159,9 @@ inputs:
 outputs:
 
   status:
-    description: '`success` if the release completed and the CLI emitted a valid JSON payload; `failure` otherwise.'
+    description: |
+      `success` if the release completed, or if `no-duplicate-release-error` is
+      `true` and the CLI printed no JSON (a swallowed 409). `failure` otherwise.
     value: ${{ steps.aether.outputs.status }}
 
   label:
@@ -175,24 +180,18 @@ outputs:
     description: 'Binary app version (or range) the release targets.'
     value: ${{ steps.aether.outputs.app-version }}
 
-  blob-url:
-    description: 'Signed URL to download the package bundle. Time-limited — not a CDN URL.'
-    value: ${{ steps.aether.outputs.blob-url }}
-
-  manifest-blob-url:
-    description: 'Signed URL to the package manifest (file hash map).'
-    value: ${{ steps.aether.outputs.manifest-blob-url }}
-
   description:
     description: 'Final release description as stored on the server, with the `[ci=...]` bracket appended when applicable.'
     value: ${{ steps.aether.outputs.description }}
 
   released-by:
-    description: 'Email of the account that owns the API key used to release.'
+    description: 'Always empty for releases made by this action.'
     value: ${{ steps.aether.outputs.released-by }}
 
   release-method:
-    description: 'How the release was produced. One of: `Upload`, `Promote`, `Rollback`.'
+    description: |
+      How the release was produced. One of: `Upload`, `Promote`, `Rollback`.
+      Empty when the CLI printed no release object.
     value: ${{ steps.aether.outputs.release-method }}
 
   upload-time:
@@ -200,15 +199,21 @@ outputs:
     value: ${{ steps.aether.outputs.upload-time }}
 
   rollout:
-    description: 'Rollout percentage as a string (e.g. `25`). Empty when the rollout is complete.'
+    description: |
+      Rollout percentage (e.g. `25`). `100` once the rollout is complete. Empty
+      when the CLI printed no release object.
     value: ${{ steps.aether.outputs.rollout }}
 
   is-mandatory:
-    description: '`true` or `false` — whether the release is mandatory.'
+    description: |
+      `true` or `false` when a release object was mapped. Empty when the CLI
+      printed none.
     value: ${{ steps.aether.outputs.is-mandatory }}
 
   is-disabled:
-    description: '`true` or `false` — whether the release is disabled.'
+    description: |
+      `true` or `false` when a release object was mapped. Empty when the CLI
+      printed none.
     value: ${{ steps.aether.outputs.is-disabled }}
 
 runs:
@@ -228,13 +233,13 @@ runs:
 
     - name: Install Aether CLI
       shell: bash
-      run: npm install -g @aetherpush/cli@0.3.4
+      run: npm install -g @aetherpush/cli@0.5.2
 
     - name: Verify CLI version matches pin
       shell: bash
       run: |
         set -euo pipefail
-        EXPECTED="0.3.4"
+        EXPECTED="0.5.2"
         INSTALLED=$(aether --version 2>/dev/null | tr -d ' \r\n')
         if [ "$INSTALLED" != "$EXPECTED" ]; then
           echo "::error::Installed CLI version '$INSTALLED' does not match expected '$EXPECTED'. Check npm registry and cache."
@@ -258,6 +263,7 @@ runs:
       id: aether
       shell: bash
       env:
+        AETHER_ACTION_PATH: ${{ github.action_path }}
         COMMAND: ${{ inputs.command }}
         WORKING_DIR: ${{ inputs.working-directory }}
         APP_NAME: ${{ inputs.app-name }}
@@ -281,102 +287,4 @@ runs:
         PRIVATE_KEY_PATH: ${{ inputs.private-key-path }}
         USE_HERMES: ${{ inputs.use-hermes }}
         DEVELOPMENT: ${{ inputs.development }}
-      run: |
-        set -euo pipefail
-
-        echo "status=failure" >> "$GITHUB_OUTPUT"
-
-        cd "$WORKING_DIR" || { echo "::error::working-directory '$WORKING_DIR' does not exist."; exit 1; }
-
-        case "$COMMAND" in
-          release)
-            if [ -z "$UPDATE_PATH" ]; then
-              echo "::error::Input 'update-contents-path' is required when command is 'release'"
-              exit 1
-            fi
-            if [ -z "$TARGET_BIN" ]; then
-              echo "::error::Input 'target-binary-version' is required when command is 'release'"
-              exit 1
-            fi
-            args=("$APP_NAME" "$UPDATE_PATH" "$TARGET_BIN")
-            args+=(-d "$DEPLOYMENT_NAME" -r "$ROLLOUT")
-            [ -n "$DESCRIPTION" ] && args+=(--description "$DESCRIPTION")
-            [ "$MANDATORY" = "true" ] && args+=(-m)
-            [ "$DISABLED" = "true" ] && args+=(-x)
-            [ "$NO_DUP" = "true" ] && args+=(--noDuplicateReleaseError)
-            [ "$FORCE" = "true" ] && args+=(--force)
-            [ "$CI_METADATA" = "false" ] && args+=(--no-ci-metadata)
-            args+=(--json)
-            echo "Running: aether release ${args[*]}"
-            aether release "${args[@]}" > release.json
-            ;;
-          release-react)
-            if [ -z "$PLATFORM" ]; then
-              echo "::error::Input 'platform' is required when command is 'release-react'"
-              exit 1
-            fi
-            if [ "$PLATFORM" != "ios" ] && [ "$PLATFORM" != "android" ]; then
-              echo "::error::Input 'platform' must be 'ios' or 'android', got '$PLATFORM'"
-              exit 1
-            fi
-            args=("$APP_NAME" "$PLATFORM")
-            args+=(-d "$DEPLOYMENT_NAME" -r "$ROLLOUT")
-            [ -n "$DESCRIPTION" ] && args+=(--description "$DESCRIPTION")
-            [ -n "$TARGET_BIN" ] && args+=(-t "$TARGET_BIN")
-            [ -n "$BUNDLE_NAME" ] && args+=(-b "$BUNDLE_NAME")
-            [ -n "$ENTRY_FILE" ] && args+=(-e "$ENTRY_FILE")
-            [ -n "$GRADLE_FILE" ] && args+=(-g "$GRADLE_FILE")
-            [ -n "$PLIST_FILE" ] && args+=(-p "$PLIST_FILE")
-            [ -n "$OUTPUT_DIR" ] && args+=(-o "$OUTPUT_DIR")
-            [ -n "$SOURCEMAP_OUTPUT" ] && args+=(-s "$SOURCEMAP_OUTPUT")
-            [ -n "$PRIVATE_KEY_PATH" ] && args+=(-k "$PRIVATE_KEY_PATH")
-            [ "$USE_HERMES" = "true" ] && args+=(--useHermes)
-            [ "$DEVELOPMENT" = "true" ] && args+=(--development)
-            [ "$MANDATORY" = "true" ] && args+=(-m)
-            [ "$DISABLED" = "true" ] && args+=(-x)
-            [ "$NO_DUP" = "true" ] && args+=(--noDuplicateReleaseError)
-            [ "$FORCE" = "true" ] && args+=(--force)
-            [ "$CI_METADATA" = "false" ] && args+=(--no-ci-metadata)
-            args+=(--json)
-            echo "Running: aether release-react ${args[*]}"
-            aether release-react "${args[@]}" > release.json
-            ;;
-          *)
-            echo "::error::Invalid command '$COMMAND'. Must be 'release' or 'release-react'."
-            exit 1
-            ;;
-        esac
-
-        if ! jq -e . release.json > /dev/null 2>&1; then
-          echo "::error::CLI returned exit 0 but emitted invalid JSON. This indicates a CLI bug — please report."
-          exit 1
-        fi
-
-        emit() {
-          local key="$1" val="$2"
-          if [[ "$val" == *$'\n'* ]]; then
-            {
-              echo "${key}<<__AETHER_EOF__"
-              echo "$val"
-              echo "__AETHER_EOF__"
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "${key}=${val}" >> "$GITHUB_OUTPUT"
-          fi
-        }
-
-        emit label             "$(jq -r '.label // empty' release.json)"
-        emit package-hash      "$(jq -r '.packageHash // empty' release.json)"
-        emit size              "$(jq -r '.size // empty' release.json)"
-        emit app-version       "$(jq -r '.appVersion // empty' release.json)"
-        emit blob-url          "$(jq -r '.blobUrl // empty' release.json)"
-        emit manifest-blob-url "$(jq -r '.manifestBlobUrl // empty' release.json)"
-        emit description       "$(jq -r '.description // empty' release.json)"
-        emit released-by       "$(jq -r '.releasedBy // empty' release.json)"
-        emit release-method    "$(jq -r '.releaseMethod // empty' release.json)"
-        emit upload-time       "$(jq -r '.uploadTime // empty' release.json)"
-        emit rollout           "$(jq -r '.rollout // empty' release.json)"
-        emit is-mandatory      "$(jq -r '.isMandatory // false' release.json)"
-        emit is-disabled       "$(jq -r '.isDisabled // false' release.json)"
-
-        echo "status=success" >> "$GITHUB_OUTPUT"
+      run: bash "$AETHER_ACTION_PATH/scripts/run-aether.sh"

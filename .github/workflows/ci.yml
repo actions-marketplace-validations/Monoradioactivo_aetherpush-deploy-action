@@ -10,10 +10,53 @@ permissions:
   contents: read
 
 jobs:
-  yaml-lint:
-    name: YAML lint
+  step-script-tests:
+    name: Step script tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run step script tests
+        shell: bash
+        env:
+          AETHER_ACTION_PATH: ${{ github.workspace }}
+        run: bash "$AETHER_ACTION_PATH/tests/run-aether.test.sh"
+
+  cli-install-smoke:
+    name: CLI install smoke
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and inspect the pinned CLI
+        run: bash tests/cli-install.test.sh
+
+  yaml-lint:
+    name: YAML lint
+    needs:
+      - step-script-tests
+      - cli-install-smoke
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require test jobs
+        if: ${{ needs.step-script-tests.result != 'success' || needs.cli-install-smoke.result != 'success' }}
+        run: exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 

@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.5.0](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.4.2...v0.5.0) (2026-09-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* the action no longer writes release.json in the job workspace. Workflows that parse that file must use the existing step outputs instead. The scratch copy is $RUNNER_TEMP/aether-release.json and is not a later-step API.
+
+### Features
+
+* cut 0.5.0 for the release.json location move ([#35](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/35)) ([83fe295](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/83fe2950aacfb36fa4ae4f6b064a071d404739e2))
+
+## [0.4.2](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.4.1...v0.4.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **deps:** keep the bundled CLI current ([#32](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/32)) ([04e70d8](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/04e70d899fba15fa9b87e92991cacd562f2b205e))
+
+## [0.4.1](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.4.0...v0.4.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **action:** treat a skipped duplicate as success ([#30](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/30)) ([657d269](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/657d269d810e17add1d7e5a1fc02c12de2b621e7))
+
+## [0.4.0](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.3.3...v0.4.0) (2026-08-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* the blob-url and manifest-blob-url outputs are removed, and there is no replacement output. The presigned URL is deliberately no longer published. Workflows that referenced either output need updating.
+
+### Features
+
+* stop publishing signed bundle URLs as step outputs ([#27](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/27)) ([7ca1e8e](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/7ca1e8e49cc24776ade21a8de2b59e34115385b9))
+
+## [0.3.3](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.3.2...v0.3.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* pin the CLI to 0.4.1 ([#18](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/18)) ([a84b00f](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/a84b00fb6d81a0381f060ffda80e10880794f76c))
+
 ## [0.3.2](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.3.1...v0.3.2) (2026-07-20)
 
 

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": [
+    "custom.regex",
+    "github-actions"
+  ],
+  "branchPrefix": "chore/renovate-",
+  "semanticCommits": "enabled",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^action\\.yml$/"
+      ],
+      "matchStrings": [
+        "@aetherpush/cli@(?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "EXPECTED=\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "@aetherpush/cli",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^README\\.md$/"
+      ],
+      "matchStrings": [
+        "aetherpush-deploy-action@v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "Monoradioactivo/aetherpush-deploy-action",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tests\\/fixtures\\/CLI_VERSION$/"
+      ],
+      "matchStrings": [
+        "(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "@aetherpush/cli",
+      "datasourceTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Update the bundled CLI daily after its three-day release cooldown",
+      "matchDepNames": [
+        "@aetherpush/cli"
+      ],
+      "semanticCommitType": "fix",
+      "automerge": true,
+      "automergeStrategy": "squash",
+      "schedule": [
+        "* 0-5 * * *"
+      ],
+      "prPriority": 10
+    },
+    {
+      "matchDepNames": [
+        "Monoradioactivo/aetherpush-deploy-action"
+      ],
+      "semanticCommitType": "docs",
+      "automerge": true,
+      "automergeStrategy": "squash"
+    },
+    {
+      "matchDepNames": [
+        "actions/setup-node"
+      ],
+      "semanticCommitType": "fix"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "groupName": "weekly updates"
+    }
+  ],
+  "timezone": "America/Mexico_City",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "minimumReleaseAge": "3 days",
+  "prConcurrentLimit": 3,
+  "osvVulnerabilityAlerts": true,
+  "dependencyDashboard": true,
+  "configMigration": true
+}
