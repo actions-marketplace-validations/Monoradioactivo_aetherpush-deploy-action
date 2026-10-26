@@ -73,9 +73,11 @@ inputs:
 
   no-duplicate-release-error:
     description: |
-      When set to `true`, a 409 from the server makes the CLI warn instead of
-      error and the step succeeds with empty release outputs. The CLI warning
-      names the reason (identical package, or an unfinished rollout).
+      When set to `true`, the CLI warns instead of erroring and the step
+      succeeds with empty release outputs, but only for a 409 the server
+      reports as a duplicate package (`duplicate_release`). Any other 409
+      fails the step, whether it names another cause, such as an unfinished
+      rollout, or names none.
     required: false
     default: 'false'
 
@@ -161,7 +163,8 @@ outputs:
   status:
     description: |
       `success` if the release completed, or if `no-duplicate-release-error` is
-      `true` and the CLI printed no JSON (a swallowed 409). `failure` otherwise.
+      `true` and the CLI printed no JSON (a swallowed duplicate-package 409).
+      `failure` otherwise.
     value: ${{ steps.aether.outputs.status }}
 
   label:
@@ -183,10 +186,6 @@ outputs:
   description:
     description: 'Final release description as stored on the server, with the `[ci=...]` bracket appended when applicable.'
     value: ${{ steps.aether.outputs.description }}
-
-  released-by:
-    description: 'Always empty for releases made by this action.'
-    value: ${{ steps.aether.outputs.released-by }}
 
   release-method:
     description: |
@@ -233,13 +232,13 @@ runs:
 
     - name: Install Aether CLI
       shell: bash
-      run: npm install -g @aetherpush/cli@0.5.2
+      run: npm install -g @aetherpush/cli@0.9.5
 
     - name: Verify CLI version matches pin
       shell: bash
       run: |
         set -euo pipefail
-        EXPECTED="0.5.2"
+        EXPECTED="0.9.5"
         INSTALLED=$(aether --version 2>/dev/null | tr -d ' \r\n')
         if [ "$INSTALLED" != "$EXPECTED" ]; then
           echo "::error::Installed CLI version '$INSTALLED' does not match expected '$EXPECTED'. Check npm registry and cache."
@@ -253,7 +252,7 @@ runs:
         API_URL: ${{ inputs.api-url }}
       run: |
         set -euo pipefail
-        args=(--accessKey "$ACCESS_KEY")
+        args=(--accessKey="$ACCESS_KEY")
         if [ -n "$API_URL" ]; then
           args+=(--serverUrl "$API_URL")
         fi

@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.6.6](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.5...v0.6.6) (2026-10-12)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @aetherpush/cli to v0.9.5 ([677bd86](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/677bd86b7ab865fe97a32c5d88382eeb0b95c433))
+
+## [0.6.5](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.4...v0.6.5) (2026-10-03)
+
+
+### Bug Fixes
+
+* **action:** say the duplicate skip swallows only a named duplicate 409 ([#74](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/74)) ([035ebf3](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/035ebf371d0e00bfbd7ced8829cc44958a614f90))
+
+## [0.6.4](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.3...v0.6.4) (2026-09-26)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @aetherpush/cli to v0.9.3 ([#60](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/60)) ([6eb3292](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/6eb329222838317a8899d6f7f448e91c24d18ffe))
+
+## [0.6.3](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.2...v0.6.3) (2026-09-16)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @aetherpush/cli to v0.9.1 ([#48](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/48)) ([d979b9e](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/d979b9ecaaa8f4f1d89ce29d775618e434587f17))
+
+## [0.6.2](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.1...v0.6.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* **ci:** count Brief-Verified across Co-authored-by trailers ([#52](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/52)) ([ae49a44](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/ae49a4499d18aefa28bc1fcbf0415f7d64ecb4b3))
+
+## [0.6.1](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.6.0...v0.6.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* pass the access key to login in the equals form ([#46](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/46)) ([a8edc62](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/a8edc62847228e5d830a4f42c14f0cbed8f985f8))
+
+## [0.6.0](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.5.1...v0.6.0) (2026-09-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* with no-duplicate-release-error enabled, a 409 raised by an unfinished rollout now fails the step instead of succeeding with empty release outputs. Finish the rollout, or roll back, before releasing again.
+
+### Features
+
+* move onto the CLI release that discriminates 409s ([#39](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/39)) ([64f06af](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/64f06af5933e6e80cd5b00259766b46cb3f196af))
+
+## [0.5.1](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.5.0...v0.5.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **action:** drop the always-empty released-by output ([#37](https://github.com/Monoradioactivo/aetherpush-deploy-action/issues/37)) ([22ad8b4](https://github.com/Monoradioactivo/aetherpush-deploy-action/commit/22ad8b4847b9d5fa259998c083a6de869c8fa62e))
+
 ## [0.5.0](https://github.com/Monoradioactivo/aetherpush-deploy-action/compare/v0.4.2...v0.5.0) (2026-09-01)
 
 

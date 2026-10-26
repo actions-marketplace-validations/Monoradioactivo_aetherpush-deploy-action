@@ -1,0 +1,773 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import copy
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("FAIL: PyYAML is required (pip install pyyaml)", file=sys.stderr)
+    sys.exit(2)
+
+repo_root = Path(__file__).resolve().parents[1]
+workflows_dir = repo_root / ".github" / "workflows"
+
+
+def run_interpolations(doc: object) -> list[str]:
+    hits: list[str] = []
+    if not isinstance(doc, dict):
+        return hits
+    jobs = doc.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return hits
+    for job_id, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps") or []
+        if not isinstance(steps, list):
+            continue
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            run = step.get("run")
+            if isinstance(run, str) and "${{" in run:
+                name = step.get("name") or "(unnamed)"
+                hits.append(f"{job_id}[{i}] {name}")
+    return hits
+
+
+def gate_workflow() -> dict:
+    return yaml.safe_load((workflows_dir / "auto-merge-release.yml").read_text(encoding="utf-8"))
+
+
+def gate_steps() -> list[dict]:
+    return gate_workflow()["jobs"]["gate"]["steps"]
+
+
+def softens_failure(node: dict) -> bool:
+    return "continue-on-error" in node
+
+
+def index_of_step(steps: list[dict], name: str) -> int:
+    for i, step in enumerate(steps):
+        if isinstance(step, dict) and step.get("name") == name:
+            return i
+    return -1
+
+
+EXPECTED_REFUSE_IF = "steps.gate.outputs.ok == 'false' && github.event_name != 'schedule'"
+CARVE_OUT_NEEDLE = "schedule carve-out"
+EXIT_1_NEEDLE = "no longer exits 1"
+
+
+def clone_gate() -> dict:
+    return copy.deepcopy(gate_workflow())
+
+
+def normalize_if(condition: object) -> str:
+    return " ".join(str(condition or "").split())
+
+
+def check_refuse_schedule_carve_out(steps: list[dict] | None = None) -> list[str]:
+    failures: list[str] = []
+    if steps is None:
+        steps = gate_steps()
+    refuse = index_of_step(steps, "Fail when the release is not accounted for")
+    if refuse == -1:
+        return ["the gate job has no 'Fail when the release is not accounted for' step"]
+    if normalize_if(steps[refuse].get("if")) != EXPECTED_REFUSE_IF:
+        failures.append(
+            "the refuse step must fail closed on pull_request and dispatch while staying green on schedule. Doctrine pins the schedule carve-out (ci-release-gate-scheduled-hold-noise); dropping != 'schedule' reopens hold-noise email, and dropping the ok==false half greens an unaccounted release PR check."
+        )
+    if not re.search(r"^\s*exit 1\s*$", steps[refuse].get("run") or "", re.MULTILINE):
+        failures.append(
+            "the refuse step keeps its if: but no longer exits 1, so a held release PR can report the required check green"
+        )
+    return failures
+
+
+def drop_schedule_carve_out(step: dict) -> None:
+    step["if"] = "steps.gate.outputs.ok == 'false'"
+
+
+def never_run_refuse(step: dict) -> None:
+    step["if"] = "false"
+
+
+def refuse_without_exit(step: dict) -> None:
+    step["run"] = 'echo "::error::The release contains commits this gate cannot vouch for."'
+
+
+def planted_refuse_must_fail(mutator, needle: str) -> list[str]:
+    doc = clone_gate()
+    steps = doc["jobs"]["gate"]["steps"]
+    refuse = index_of_step(steps, "Fail when the release is not accounted for")
+    if refuse == -1:
+        return ["planted refuse mutation: refuse step missing"]
+    mutator(steps[refuse])
+    failures = check_refuse_schedule_carve_out(steps)
+    if not failures:
+        return [f"planted refuse mutation was not caught ({needle})"]
+    joined = " ".join(failures)
+    if needle not in joined:
+        return [f"planted refuse mutation failed for the wrong reason: {joined}"]
+    return []
+
+
+def reads_verdict(step: dict) -> bool:
+    sources = [step.get("if")]
+    for key in ("env", "with"):
+        section = step.get(key)
+        if isinstance(section, dict):
+            sources.extend(section.values())
+    return any(isinstance(s, str) and "gate.outputs." in s for s in sources)
+
+
+def check_absent_verdict_step() -> list[str]:
+    failures: list[str] = []
+    steps = gate_steps()
+    verdict = index_of_step(steps, "Require a verdict from the gate")
+    if verdict == -1:
+        return ["the gate job has no 'Require a verdict from the gate' step"]
+
+    expected_if = "steps.pr.outputs.number != '' && steps.gate.outputs.ok == ''"
+    if steps[verdict].get("if") != expected_if:
+        failures.append(f"the verdict step's if is {steps[verdict].get('if')!r}, not {expected_if!r}")
+    if not re.search(r"^\s*exit 1\s*$", steps[verdict].get("run") or "", re.MULTILINE):
+        failures.append("the verdict step does not fail the job")
+    if softens_failure(steps[verdict]):
+        failures.append("the verdict step carries continue-on-error, so its failure may not red the job")
+
+    refuse = index_of_step(steps, "Fail when the release is not accounted for")
+    if refuse == -1:
+        failures.append("the gate job has no 'Fail when the release is not accounted for' step")
+    elif softens_failure(steps[refuse]):
+        failures.append("the step that reds an unaccounted release carries continue-on-error")
+    if refuse != -1:
+        failures.extend(check_refuse_schedule_carve_out(steps))
+
+    doc = gate_workflow()
+    job = doc["jobs"]["gate"]
+    if softens_failure(job):
+        failures.append("the gate job carries continue-on-error, so the run may pass even when the job fails")
+    if "strategy" in job:
+        failures.append("a matrix renames the check, so the required context never reports and every pull request waits on it")
+    if "if" in job:
+        failures.append("these four deliberately carry no job-level if (doctrine/shipping.md); one that can skip the release pull request makes the required check report satisfied")
+    if list(doc["jobs"]) != ["gate"]:
+        failures.append("another job in this workflow can take the gate's required-check name or make it skip through needs")
+
+    context = (doc.get("env") or {}).get("GATE_CONTEXT")
+    if not isinstance(context, str) or not context:
+        failures.append("GATE_CONTEXT is missing or empty, and the required-check lookup then matches a blank line")
+    elif job.get("name") != context:
+        failures.append("the gate job's name no longer matches GATE_CONTEXT, the name the ruleset requires")
+
+    gate = index_of_step(steps, "Evaluate the gate")
+    if gate == -1:
+        failures.append("the gate job has no 'Evaluate the gate' step")
+    else:
+        if steps[gate].get("id") != "gate":
+            failures.append("the verdict step reads steps.gate.outputs.ok, which is empty on every run unless the evaluate step's id is gate")
+        if not str(steps[verdict].get("if")).startswith(f"{steps[gate].get('if')} &&"):
+            failures.append("the verdict step can fire where the gate itself was skipped")
+
+    consumers = [i for i, step in enumerate(steps) if i != verdict and reads_verdict(step)]
+    if not consumers:
+        failures.append("no step reads gate.outputs.ok, so the verdict step guards nothing")
+    for i in consumers:
+        if i < verdict:
+            failures.append(f"step {i} ({steps[i].get('name')}) reads the verdict before the check")
+
+    disarm = index_of_step(steps, "Disarm if this run failed")
+    if disarm == -1:
+        failures.append("the gate job has no 'Disarm if this run failed' step")
+    else:
+        if disarm < verdict:
+            failures.append("a failed verdict check never reaches the step that drops a stale arm")
+        if "failure()" not in str(steps[disarm].get("if")):
+            failures.append("the disarm step no longer runs on failure")
+    return failures
+
+
+def check_verdict_consumers() -> list[str]:
+    failures: list[str] = []
+    steps = gate_steps()
+    consumers = [
+        step
+        for step in steps
+        if isinstance(step.get("if"), str)
+        and "steps.gate.outputs.ok" in step["if"]
+        and step.get("name") != "Require a verdict from the gate"
+    ]
+    if len(consumers) < 3:
+        failures.append("a step that acted on the verdict stopped naming steps.gate.outputs.ok")
+    for step in consumers:
+        if not re.search(r"steps\.gate\.outputs\.ok == '(true|false)'", step["if"]):
+            failures.append(f"{step.get('name')} reads ok without a literal")
+
+    arm_at = index_of_step(steps, "Arm the merge")
+    required_at = index_of_step(steps, "Confirm this gate is a required check")
+    if arm_at == -1 or required_at == -1:
+        failures.append("the gate job lost its arm or required-check step")
+        return failures
+    arm_if = str(steps[arm_at].get("if"))
+    if "steps.gate.outputs.ok" in arm_if:
+        failures.append("the arm step reads the verdict directly instead of through the required-check step")
+    if "steps.required.outputs.required == 'true'" not in arm_if:
+        failures.append("the arm step no longer waits for the required-check confirmation")
+    if "steps.gate.outputs.ok == 'true'" not in str(steps[required_at].get("if")):
+        failures.append("the required-check step no longer waits for a true verdict")
+    return failures
+
+
+RESOLVE_REPO = "Monoradioactivo/release-gate-fixture"
+RELEASE_HEAD = "release-please--branches--main--components--fixture"
+RELEASE_BOT = "aetherpush-release-bot[bot]"
+EMPTY_NEEDLE = "resolved empty"
+
+RESOLVE_STUB = "\n".join(
+    [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" >> "$GH_CALLS"',
+        'FILTER=""',
+        'PREV=""',
+        'for ARG in "$@"; do',
+        '  if [ "$PREV" = "--jq" ]; then FILTER="$ARG"; fi',
+        '  PREV="$ARG"',
+        "done",
+        'case "$1 $2" in',
+        '  "pr list") BODY="$STUB_OPEN_PULLS" ;;',
+        '  "api repos/$GITHUB_REPOSITORY/pulls/"*) BODY="$STUB_PULL" ;;',
+        '  "pr merge") exit 0 ;;',
+        '  "pr view")',
+        '    if [ "$STUB_PR_VIEW_FAIL" = "1" ]; then echo "stub: refusing the pull request read" >&2; exit 1; fi',
+        '    BODY="$STUB_PR_VIEW" ;;',
+        '  "api repos/$GITHUB_REPOSITORY/actions/runs/"*)',
+        '    if [ "$STUB_RUN_FAIL" = "1" ]; then echo "stub: refusing the run read" >&2; exit 1; fi',
+        '    BODY="$STUB_RUN" ;;',
+        '  "pr comment")',
+        '    cat >> "$GH_BODIES"',
+        '    if [ "$STUB_COMMENT_FAIL" = "1" ]; then echo "stub: refusing to comment" >&2; exit 1; fi',
+        "    exit 0 ;;",
+        '  "api --paginate")',
+        '    if [ "$STUB_COMMENTS_FAIL" = "1" ]; then echo "stub: refusing the comments read" >&2; exit 1; fi',
+        '    BODY="$STUB_COMMENTS" ;;',
+        '  *) echo "unexpected gh: $*" >&2; exit 1 ;;',
+        "esac",
+        'printf "%s" "$BODY" | jq -r "$FILTER"',
+        "",
+    ]
+)
+
+STEP_EXPRESSIONS = {
+    "${{ github.event_name }}": "event",
+    "${{ github.head_ref }}": "head_ref",
+    "${{ github.event.pull_request.state }}": "pr_state",
+    "${{ github.event.pull_request.number }}": "event_pr",
+    "${{ steps.app-token.outputs.token }}": "token",
+    "${{ steps.pr.outputs.number }}": "pr_number",
+    "${{ steps.gate.outputs.reasons }}": "reasons",
+    "${{ steps.gate.outputs.marker }}": "marker",
+}
+
+
+class StepFailure(Exception):
+    pass
+
+
+def run_step(doc: dict, step: dict, context: dict) -> dict:
+    if not isinstance(step.get("run"), str):
+        raise StepFailure(f"{step.get('name')} has no run script")
+    env = {
+        "PATH": "",
+        "GITHUB_REPOSITORY": RESOLVE_REPO,
+        "STUB_OPEN_PULLS": context.get("open_pulls", "[]"),
+        "STUB_PULL": context.get("pull", ""),
+        "STUB_COMMENTS": context.get("comments", "[]"),
+        "STUB_COMMENTS_FAIL": context.get("comments_fail", ""),
+        "STUB_COMMENT_FAIL": context.get("comment_fail", ""),
+        "GITHUB_RUN_ID": "99",
+        "STUB_RUN": context.get("run", json.dumps({"run_started_at": RUN_STARTED_AT})),
+        "STUB_RUN_FAIL": context.get("run_fail", ""),
+        "STUB_PR_VIEW": context.get("pr_view", json.dumps({"autoMergeRequest": None})),
+        "STUB_PR_VIEW_FAIL": context.get("pr_view_fail", ""),
+    }
+    env.update({key: str(value) for key, value in (doc.get("env") or {}).items()})
+    for key, expression in (step.get("env") or {}).items():
+        field = STEP_EXPRESSIONS.get(expression)
+        if field is None:
+            raise StepFailure(f"{step.get('name')} reads {expression}, which this harness does not model")
+        env[key] = context.get(field, "")
+
+    with tempfile.TemporaryDirectory(prefix="release-pr-resolve-") as tmp:
+        root = Path(tmp)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "gh"
+        stub.write_text(RESOLVE_STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        script = root / "step.sh"
+        script.write_text(step["run"], encoding="utf-8")
+        output = root / "github_output"
+        output.write_text("", encoding="utf-8")
+        calls = root / "gh_calls"
+        calls.write_text("", encoding="utf-8")
+        bodies = root / "gh_bodies"
+        bodies.write_text("", encoding="utf-8")
+        summary = root / "step_summary"
+        summary.write_text("", encoding="utf-8")
+        env["PATH"] = f"{bin_dir}:/usr/bin:/bin"
+        env["GITHUB_OUTPUT"] = str(output)
+        env["GH_CALLS"] = str(calls)
+        env["GH_BODIES"] = str(bodies)
+        env["GITHUB_STEP_SUMMARY"] = str(summary)
+        result = subprocess.run(
+            ["bash", "-e", str(script)], env=env, capture_output=True, text=True, timeout=30
+        )
+        if "unexpected gh:" in result.stderr:
+            raise StepFailure(f"{step.get('name')} asked the stub something it does not answer: {result.stderr}")
+        if context.get("expect_failure"):
+            if result.returncode == 0:
+                raise StepFailure(f"{step.get('name')} exited 0 where it had to fail")
+        elif result.returncode != 0:
+            raise StepFailure(f"{step.get('name')} exited {result.returncode}: {result.stderr}")
+        outputs: dict = {}
+        for line in output.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key:
+                outputs[key] = value
+        return {
+            "outputs": outputs,
+            "calls": calls.read_text(encoding="utf-8"),
+            "bodies": bodies.read_text(encoding="utf-8"),
+            "summary": summary.read_text(encoding="utf-8"),
+        }
+
+
+def resolve_release_pull_request(doc: dict, context: dict) -> dict:
+    steps = doc["jobs"]["gate"]["steps"]
+    scope_at = index_of_step(steps, "Decide whether this run has anything to do")
+    resolve_at = index_of_step(steps, "Resolve the release pull request")
+    gate_at = index_of_step(steps, "Evaluate the gate")
+    if -1 in (scope_at, resolve_at, gate_at):
+        raise StepFailure("the gate job lost its scope, resolve, or evaluate step")
+    scope, resolve, gate = steps[scope_at], steps[resolve_at], steps[gate_at]
+    if scope.get("id") != "scope" or resolve.get("id") != "pr":
+        raise StepFailure("the scope or resolve step changed its id, so the outputs the gate reads are empty")
+    if normalize_if(resolve.get("if")) != "steps.scope.outputs.applies == 'true'":
+        raise StepFailure(f"the resolve step's if is {resolve.get('if')!r}")
+    if normalize_if(gate.get("if")) != "steps.pr.outputs.number != ''":
+        raise StepFailure(f"the evaluate step's if is {gate.get('if')!r}")
+
+    full = {"token": "stub-app-token", "event_pr": "", "head_ref": "", "pr_state": "", **context}
+    scoped = run_step(doc, scope, full)["outputs"]
+    if scoped.get("applies") != "true":
+        return {"applies": scoped.get("applies"), "number": "", "calls": ""}
+    resolve_run = run_step(doc, resolve, full)
+    if "number" not in resolve_run["outputs"]:
+        raise StepFailure("the resolve step exited without writing number")
+    return {"applies": "true", "number": resolve_run["outputs"]["number"], "calls": resolve_run["calls"]}
+
+
+RUN_STARTED_AT = "2026-10-06T12:00:00Z"
+ARMED_BEFORE_RUN = "2026-10-06T11:59:30Z"
+ARMED_AFTER_RUN = "2026-10-06T12:00:30Z"
+
+MARKER_A = "<!-- release-auto-merge-gate:aaaaaaaaaaaaaaaa -->"
+MARKER_B = "<!-- release-auto-merge-gate:bbbbbbbbbbbbbbbb -->"
+LEGACY_MARKER = "<!-- release-auto-merge-gate -->"
+REASONS_A = "#1 (1111111) carries neither a Brief-Verified trailer nor the brief-verified label"
+REASONS_B = f"{REASONS_A}; #2 (2222222) carries neither a Brief-Verified trailer nor the brief-verified label"
+
+
+def held_comments(*bodies: str) -> str:
+    return json.dumps([{"id": index + 1, "body": body} for index, body in enumerate(bodies)])
+
+
+def hold_comment(marker: str, reasons: str) -> str:
+    return f"{marker}\nThis release is held for a human merge:\n\n{reasons}\n"
+
+
+def run_hold(**context) -> dict:
+    doc = gate_workflow()
+    steps = doc["jobs"]["gate"]["steps"]
+    hold_at = index_of_step(steps, "Hold the release for a human")
+    if hold_at == -1:
+        raise StepFailure("the gate job lost its hold step")
+    full = {
+        "token": "stub-app-token",
+        "pr_number": "42",
+        "reasons": REASONS_A,
+        "marker": MARKER_A,
+        "comments": held_comments(),
+        **context,
+    }
+    return run_step(doc, steps[hold_at], full)
+
+
+def commented(run: dict) -> bool:
+    return bool(re.search(r"^pr comment", run["calls"], re.MULTILINE))
+
+
+def disarm_calls(run: dict) -> list[str]:
+    return [
+        line
+        for line in run["calls"].splitlines()
+        if "pr merge" in line and "--disable-auto" in line
+    ]
+
+
+def armed_at(enabled_at: str) -> str:
+    return json.dumps({"autoMergeRequest": {"enabledAt": enabled_at}})
+
+
+def check_hold_spares_a_newer_arm() -> list[str]:
+    failures: list[str] = []
+
+    newer = run_hold(pr_view=armed_at(ARMED_AFTER_RUN))
+    if disarm_calls(newer):
+        failures.append(
+            "the hold step disarmed an arm placed after this run started, so a verdict from an older head strips the arm a newer run placed and the release waits for the next executed slot"
+        )
+    if "Left the arm on #42 in place" not in newer["summary"]:
+        failures.append("the hold step did not say it left a newer arm in place")
+    if not commented(newer):
+        failures.append("a held release with a newer arm was left without its hold comment")
+
+    older = run_hold(pr_view=armed_at(ARMED_BEFORE_RUN))
+    if len(disarm_calls(older)) != 1:
+        failures.append("a release this run refused was left armed")
+
+    unarmed = run_hold()
+    if len(disarm_calls(unarmed)) != 1:
+        failures.append("a hold with nothing armed stopped asking for the disarm")
+
+    unreadable_pull = run_hold(pr_view_fail="1")
+    if len(disarm_calls(unreadable_pull)) != 1:
+        failures.append("an unreadable arm was left in place, so a refused release could still merge")
+
+    unreadable_run = run_hold(run_fail="1", pr_view=armed_at(ARMED_AFTER_RUN))
+    if len(disarm_calls(unreadable_run)) != 1:
+        failures.append("an unreadable run start was treated as an arm worth keeping")
+
+    return failures
+
+
+def check_hold_comment_refresh() -> list[str]:
+    failures: list[str] = []
+
+    steps = gate_workflow()["jobs"]["gate"]["steps"]
+    hold_at = index_of_step(steps, "Hold the release for a human")
+    if hold_at == -1:
+        return ["the gate job lost its hold step"]
+    hold = steps[hold_at]
+    if (hold.get("env") or {}).get("MARKER_ID") != "${{ steps.gate.outputs.marker }}":
+        failures.append("the hold step no longer reads the marker the gate writes")
+
+    if not commented(run_hold()):
+        failures.append("a held release with no hold comment yet was left without one")
+
+    unchanged = run_hold(comments=held_comments(hold_comment(MARKER_A, REASONS_A)))
+    if commented(unchanged):
+        failures.append("a hold whose reasons did not change earned a second comment")
+
+    changed = run_hold(
+        marker=MARKER_B,
+        reasons=REASONS_B,
+        comments=held_comments(hold_comment(MARKER_A, REASONS_A)),
+    )
+    if not commented(changed):
+        failures.append("a hold whose reasons changed earned no comment")
+    elif "#2 (2222222)" not in changed["bodies"]:
+        failures.append("the refreshed comment does not name the commit that changed the reasons")
+
+    stale_newest = run_hold(
+        comments=held_comments(hold_comment(MARKER_A, REASONS_A), hold_comment(MARKER_B, REASONS_B))
+    )
+    if not commented(stale_newest):
+        failures.append("an older matching comment silenced a hold whose newest comment differs")
+
+    edited = run_hold(
+        comments=held_comments(f"{MARKER_A}\r\nThis release is held for a human merge:\r\n\r\nand a note")
+    )
+    if commented(edited):
+        failures.append("a hold comment edited in the browser earns a fresh comment on every run")
+
+    unreadable = run_hold(comments_fail="1", expect_failure=True)
+    if commented(unreadable):
+        failures.append("a failed comments read still posted a comment")
+    if "Could not read the comments" not in unreadable["summary"]:
+        failures.append("a failed comments read did not say so in the step summary")
+
+    null_body = run_hold(
+        comments=json.dumps([{"id": 1, "body": None}, {"id": 2, "body": hold_comment(MARKER_A, REASONS_A)}])
+    )
+    if commented(null_body):
+        failures.append("a comment with no body broke the read")
+
+    legacy = run_hold(marker="", comments=held_comments(hold_comment(LEGACY_MARKER, REASONS_A)))
+    if commented(legacy):
+        failures.append("the no-marker fallback commented although a hold comment was already there")
+    bare = run_hold(marker="")
+    if not commented(bare):
+        failures.append("the no-marker fallback left a held release without any comment")
+
+    refused = run_hold(comment_fail="1", expect_failure=True)
+    if "this hold is not reported" not in refused["summary"]:
+        failures.append("a refused comment did not say so in the step summary")
+
+    return failures
+
+
+def pull_facts(author: str = RELEASE_BOT, head: str = RELEASE_HEAD, state: str = "open") -> str:
+    return json.dumps({"user": {"login": author}, "head": {"ref": head}, "state": state})
+
+
+def open_pulls(*pulls: tuple[int, str]) -> str:
+    return json.dumps([{"number": number, "headRefName": head} for number, head in pulls])
+
+
+def check_genuine_release_resolves(doc: dict) -> list[str]:
+    failures: list[str] = []
+    on_event = resolve_release_pull_request(
+        doc,
+        {"event": "pull_request", "event_pr": "160", "head_ref": RELEASE_HEAD, "pr_state": "open", "pull": pull_facts()},
+    )
+    if on_event["number"] != "160":
+        failures.append(
+            f"a genuine release pull request event {EMPTY_NEEDLE}, so the gate and its backstop skip and the check reports green"
+        )
+    on_schedule = resolve_release_pull_request(
+        doc,
+        {
+            "event": "schedule",
+            "open_pulls": open_pulls((12, "feat/unrelated"), (160, RELEASE_HEAD)),
+            "pull": pull_facts(),
+        },
+    )
+    if on_schedule["number"] != "160":
+        failures.append(
+            f"a scheduled run {EMPTY_NEEDLE} with a genuine release pull request open, so the gate never evaluates it"
+        )
+    return failures
+
+
+def check_release_pull_request_resolution() -> list[str]:
+    doc = gate_workflow()
+    failures = check_genuine_release_resolves(doc)
+
+    on_event = resolve_release_pull_request(
+        doc,
+        {"event": "pull_request", "event_pr": "160", "head_ref": RELEASE_HEAD, "pr_state": "open", "pull": pull_facts()},
+    )
+    if not re.search(rf"^api repos/{RESOLVE_REPO}/pulls/160 ", on_event["calls"], re.MULTILINE):
+        failures.append("the resolve step did not read the pull request the event names")
+    if re.search(r"^pr list", on_event["calls"], re.MULTILINE):
+        failures.append("the resolve step listed pull requests on a pull_request event")
+
+    empty_cases = {
+        "no open release branch": {"event": "schedule", "open_pulls": open_pulls((12, "feat/unrelated"))},
+        "a release branch pull request not authored by the release bot": {
+            "event": "pull_request",
+            "event_pr": "161",
+            "head_ref": RELEASE_HEAD,
+            "pr_state": "open",
+            "pull": pull_facts(author="drive-by"),
+        },
+        "a release pull request that is no longer open": {
+            "event": "workflow_dispatch",
+            "open_pulls": open_pulls((160, RELEASE_HEAD)),
+            "pull": pull_facts(state="closed"),
+        },
+        "a bot pull request whose head is not a release branch": {
+            "event": "workflow_dispatch",
+            "open_pulls": open_pulls((160, RELEASE_HEAD)),
+            "pull": pull_facts(head="feat/not-a-release"),
+        },
+    }
+    for label, context in empty_cases.items():
+        run = resolve_release_pull_request(doc, context)
+        if run["applies"] != "true":
+            failures.append(f"{label}: the scope step skipped resolution")
+        if run["number"] != "":
+            failures.append(f"{label}: resolved to {run['number']!r} instead of empty")
+
+    listing = resolve_release_pull_request(doc, empty_cases["no open release branch"])
+    if "pulls/" in listing["calls"]:
+        failures.append("no open release branch still read a pull request")
+    if not re.search(rf"^pr list --repo {RESOLVE_REPO} --state open ", listing["calls"], re.MULTILINE):
+        failures.append("the scheduled lookup no longer lists only this repository's open pull requests")
+
+    ordinary = resolve_release_pull_request(
+        doc, {"event": "pull_request", "event_pr": "12", "head_ref": "feat/unrelated", "pr_state": "open"}
+    )
+    if ordinary["applies"] != "false" or ordinary["number"] != "":
+        failures.append("an ordinary pull request reached resolution")
+    return failures
+
+
+def drop_resolved_number(doc: dict) -> None:
+    steps = doc["jobs"]["gate"]["steps"]
+    resolve = steps[index_of_step(steps, "Resolve the release pull request")]
+    planted = resolve["run"].replace('echo "number=$CANDIDATE"', 'echo "number="')
+    if planted == resolve["run"]:
+        raise StepFailure("the resolve step no longer writes number=$CANDIDATE, so this mutation plants nothing")
+    resolve["run"] = planted
+
+
+def miss_release_prefix(doc: dict) -> None:
+    doc["env"]["RELEASE_BRANCH_PREFIX"] = "release-please--branches--master"
+
+
+def wrong_release_bot(doc: dict) -> None:
+    doc["env"]["RELEASE_BOT_LOGIN"] = "release-please[bot]"
+
+
+def planted_resolution_must_fail(mutator) -> list[str]:
+    doc = clone_gate()
+    mutator(doc)
+    failures = check_genuine_release_resolves(doc)
+    if not failures:
+        return [f"planted resolution mutation {mutator.__name__} was not caught"]
+    if EMPTY_NEEDLE not in " ".join(failures):
+        return [f"planted resolution mutation {mutator.__name__} failed for the wrong reason: {failures}"]
+    return []
+
+
+def main() -> int:
+    files = sorted(
+        [p for p in workflows_dir.iterdir() if p.suffix in {".yml", ".yaml"}]
+    )
+    if not files:
+        print("FAIL: no workflow files found", file=sys.stderr)
+        return 1
+    all_hits: list[str] = []
+    for path in files:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for hit in run_interpolations(doc):
+            all_hits.append(f"{path.name}: {hit}")
+    if all_hits:
+        print("FAIL: interpolations inside run:", file=sys.stderr)
+        for hit in all_hits:
+            print(f"  {hit}", file=sys.stderr)
+        return 1
+
+    planted = yaml.safe_load(
+        "\n".join(
+            [
+                "jobs:",
+                "  example:",
+                "    steps:",
+                "      - name: bad",
+                "        run: |",
+                '          BRANCH="${{ github.head_ref }}"',
+            ]
+        )
+    )
+    if run_interpolations(planted) != ["example[0] bad"]:
+        print("FAIL: scanner did not report planted github.head_ref", file=sys.stderr)
+        return 1
+
+    planted_env = yaml.safe_load(
+        "\n".join(
+            [
+                "jobs:",
+                "  example:",
+                "    steps:",
+                "      - name: still-interpolated",
+                "        env:",
+                "          BRANCH: ${{ github.head_ref }}",
+                "        run: |",
+                '          echo "${{ env.BRANCH }}"',
+            ]
+        )
+    )
+    if run_interpolations(planted_env) != ["example[0] still-interpolated"]:
+        print("FAIL: scanner did not report planted env.BRANCH", file=sys.stderr)
+        return 1
+
+    verdict_failures = check_absent_verdict_step()
+    if verdict_failures:
+        print("FAIL: the release gate's absent-verdict backstop:", file=sys.stderr)
+        for failure in verdict_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    refuse_failures = check_refuse_schedule_carve_out()
+    if refuse_failures:
+        print("FAIL: the refuse step schedule carve-out:", file=sys.stderr)
+        for failure in refuse_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    planted_failures: list[str] = []
+    planted_failures.extend(planted_refuse_must_fail(drop_schedule_carve_out, CARVE_OUT_NEEDLE))
+    planted_failures.extend(planted_refuse_must_fail(never_run_refuse, CARVE_OUT_NEEDLE))
+    planted_failures.extend(planted_refuse_must_fail(refuse_without_exit, EXIT_1_NEEDLE))
+    if planted_failures:
+        print("FAIL: planted refuse mutations:", file=sys.stderr)
+        for failure in planted_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    consumer_failures = check_verdict_consumers()
+    if consumer_failures:
+        print("FAIL: the steps that act on the gate verdict:", file=sys.stderr)
+        for failure in consumer_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    try:
+        resolution_failures = check_release_pull_request_resolution()
+        for mutator in (drop_resolved_number, miss_release_prefix, wrong_release_bot):
+            resolution_failures.extend(planted_resolution_must_fail(mutator))
+    except StepFailure as error:
+        resolution_failures = [str(error)]
+    if resolution_failures:
+        print("FAIL: the release pull request resolution:", file=sys.stderr)
+        for failure in resolution_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    try:
+        hold_failures = check_hold_comment_refresh()
+    except StepFailure as error:
+        hold_failures = [str(error)]
+    if hold_failures:
+        print("FAIL: the hold comment refresh:", file=sys.stderr)
+        for failure in hold_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    try:
+        arm_failures = check_hold_spares_a_newer_arm()
+    except StepFailure as error:
+        arm_failures = [str(error)]
+    if arm_failures:
+        print("FAIL: the hold step's treatment of another run's arm:", file=sys.stderr)
+        for failure in arm_failures:
+            print(f"  {failure}", file=sys.stderr)
+        return 1
+
+    print("PASS: no workflow interpolates expressions inside run:")
+    print("PASS: an absent gate verdict fails the job before any step reads it")
+    print("PASS: the refuse step skips schedule and still fails closed on every other event")
+    print("PASS: planted refuse mutations fail the schedule carve-out check")
+    print("PASS: every step that acts on the verdict reads an explicit true or false")
+    print("PASS: a genuine release pull request resolves, and both empty exits stay empty")
+    print("PASS: planted resolution mutations fail the genuine release check")
+    print("PASS: the hold comment is refreshed when its reasons change and left alone when they do not")
+    print("PASS: the hold step leaves an arm another run placed after this run started and disarms the rest")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

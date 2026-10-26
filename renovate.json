@@ -22,18 +22,6 @@
     {
       "customType": "regex",
       "managerFilePatterns": [
-        "/^README\\.md$/"
-      ],
-      "matchStrings": [
-        "aetherpush-deploy-action@v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
-      ],
-      "depNameTemplate": "Monoradioactivo/aetherpush-deploy-action",
-      "datasourceTemplate": "github-releases",
-      "extractVersionTemplate": "^v(?<version>.*)$"
-    },
-    {
-      "customType": "regex",
-      "managerFilePatterns": [
         "/^tests\\/fixtures\\/CLI_VERSION$/"
       ],
       "matchStrings": [
@@ -45,25 +33,16 @@
   ],
   "packageRules": [
     {
-      "description": "Update the bundled CLI daily after its three-day release cooldown",
+      "description": "Open a CLI bump on the first Renovate run after the CLI is published. No cooldown: this is our own release, not a third-party dependency. Merged by hand because a CLI release can change what the action's flags do",
       "matchDepNames": [
         "@aetherpush/cli"
       ],
       "semanticCommitType": "fix",
-      "automerge": true,
-      "automergeStrategy": "squash",
       "schedule": [
-        "* 0-5 * * *"
+        "at any time"
       ],
+      "minimumReleaseAge": null,
       "prPriority": 10
-    },
-    {
-      "matchDepNames": [
-        "Monoradioactivo/aetherpush-deploy-action"
-      ],
-      "semanticCommitType": "docs",
-      "automerge": true,
-      "automergeStrategy": "squash"
     },
     {
       "matchDepNames": [

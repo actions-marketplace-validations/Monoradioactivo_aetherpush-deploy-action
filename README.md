@@ -30,7 +30,9 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+      # x-release-please-start-version
+      - uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+      # x-release-please-end
         with:
           access-key: ${{ secrets.AETHER_ACCESS_KEY }}
           app-name: my-rn-app
@@ -68,7 +70,7 @@ so they don't belong in CI.
 | `rollout` | no | `100%` | Percentage of clients. |
 | `mandatory` | no | `false` | Force install on clients. |
 | `disabled` | no | `false` | Upload in a disabled state. |
-| `no-duplicate-release-error` | no | `false` | The CLI warns on a 409 (identical package or unfinished rollout) and the step succeeds with empty release outputs. |
+| `no-duplicate-release-error` | no | `false` | The CLI warns and the step succeeds with empty release outputs, but only for a 409 reported as a duplicate package (`duplicate_release`). Any other 409 fails the step, whether it names another cause, such as an unfinished rollout, or names none. |
 | `ci-metadata` | no | `true` | Append a `[ci=…]` tag to the description. |
 | `force` | no | `false` | Skip destructive-action prompts. |
 | `api-url` | no | | Override the server URL (e.g. staging). |
@@ -102,13 +104,12 @@ so they don't belong in CI.
 
 | Output | Description |
 |---|---|
-| `status` | `success` or `failure`. `success` includes a swallowed 409 when `no-duplicate-release-error` is true. |
+| `status` | `success` or `failure`. `success` includes a swallowed duplicate-package 409 when `no-duplicate-release-error` is true. |
 | `label` | Release label (e.g. `v4`). Empty when the CLI printed no release object. |
 | `package-hash` | SHA-256 of the package. Empty when the CLI printed no release object. |
 | `size` | Package size in bytes. Empty when the CLI printed no release object. |
 | `app-version` | Targeted binary version. Empty when the CLI printed no release object. |
 | `description` | Final description, with `[ci=…]` appended when enabled. Empty when the CLI printed no release object. |
-| `released-by` | Always empty for releases made by this action. |
 | `release-method` | `Upload`, `Promote`, or `Rollback`. Empty when the CLI printed no release object. |
 | `upload-time` | Unix timestamp in milliseconds. Empty when the CLI printed no release object. |
 | `rollout` | Rollout percentage. `100` once complete. Empty when the CLI printed no release object. |
@@ -119,8 +120,10 @@ When `no-duplicate-release-error` is true and the CLI prints no JSON, `status` i
 `success` and the metadata outputs stay empty. Put `id: release` on the action
 step, then gate later steps with `if: steps.release.outputs.label != ''`. A job
 that uses `needs:` must pass `label` through that job's `outputs` map; `steps`
-is not visible across jobs. The CLI warning in the log names the 409 (identical
-package, or an unfinished rollout).
+is not visible across jobs. The CLI warning in the log names the conflict the
+server reported. Only a 409 named `duplicate_release` is skipped. Any other 409
+makes the CLI exit with an error and fails the step, whether the server names
+another cause, such as an unfinished rollout, or names none.
 
 The action has no output for the bundle download URL. The CLI returns a presigned URL
 that stays valid for seven days, and there is no way to revoke a single link. A step
@@ -131,7 +134,7 @@ holding the deployment key, but a release that is disabled or still rolling out 
 fetched through the URL before it is reachable through the app.
 
 The action writes `$RUNNER_TEMP/aether-release.json` while mapping the CLI `--json`
-object onto the outputs above, then deletes both URL fields from that file. Later
+object onto the outputs above, then deletes the URL field from that file. Later
 steps in the same job read those outputs, not the file. Two action steps in one job
 overwrite the same temp path. In a workflow YAML `path:`, that directory is
 `${{ runner.temp }}`. The action does not upload that file, and neither should you.
@@ -144,7 +147,9 @@ For a JS bundle you already built, use `command: release` with an explicit path
 and target version.
 
 ```yaml
-- uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+# x-release-please-start-version
+- uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+# x-release-please-end
   with:
     access-key: ${{ secrets.AETHER_ACCESS_KEY }}
     app-name: my-app
@@ -160,7 +165,9 @@ and target version.
 `target-binary-version` to let the CLI read the version from the native project.
 
 ```yaml
-- uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+# x-release-please-start-version
+- uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+# x-release-please-end
   with:
     access-key: ${{ secrets.AETHER_ACCESS_KEY }}
     app-name: my-rn-app
@@ -189,7 +196,9 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+      # x-release-please-start-version
+      - uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+      # x-release-please-end
         with:
           access-key: ${{ secrets.AETHER_ACCESS_KEY }}
           app-name: my-rn-app
@@ -221,7 +230,9 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/mobile
-      - uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+      # x-release-please-start-version
+      - uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+      # x-release-please-end
         with:
           access-key: ${{ secrets.AETHER_ACCESS_KEY }}
           app-name: my-rn-app
@@ -236,7 +247,9 @@ jobs:
 While the action is in 0.x, pin to an exact version:
 
 ```yaml
-uses: Monoradioactivo/aetherpush-deploy-action@v0.3.3
+# x-release-please-start-version
+uses: Monoradioactivo/aetherpush-deploy-action@v0.6.6
+# x-release-please-end
 ```
 
 Moving tags (`@v1`, `@v1.2`) arrive at 1.0.0. Until then, bump the exact version
